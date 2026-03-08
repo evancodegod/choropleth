@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Canada Choropleth</title>
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <style>
+    :root {
+      --bg: #f5f7fa;
+      --panel: #ffffff;
+      --text: #112031;
+      --muted: #4e5d6c;
+      --accent: #0a6fb4;
+      --border: #d6dce3;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      color: var(--text);
+      background: linear-gradient(180deg, #eff3f7 0%, #f7fafc 100%);
+    }
+
+    .app {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 16px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .controls {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(180px, 1fr));
+      gap: 10px;
+      align-items: end;
+    }
+
+    .control-group label {
+      display: block;
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+
+    select {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--text);
+    }
+
+    .status {
+      font-size: 0.9rem;
+      color: var(--muted);
+      padding: 0 2px;
+    }
+
+    #map {
+      height: 76vh;
+      min-height: 520px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      background: #dbe5ef;
+    }
+
+    .legend {
+      background: rgba(255, 255, 255, 0.95);
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      line-height: 1.5;
+      font-size: 0.82rem;
+      color: #222;
+    }
+
+    .legend i {
+      width: 14px;
+      height: 14px;
+      float: left;
+      margin-right: 6px;
+      opacity: 0.95;
+      border: 1px solid #7f8c8d;
+    }
+
+    .leaflet-tooltip {
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+
+    @media (max-width: 900px) {
+      .controls {
+        grid-template-columns: 1fr;
+      }
+
+      #map {
+        min-height: 440px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <section class="controls">
+      <div class="control-group">
+        <label for="facilitySelect">Facility type</label>
+        <select id="facilitySelect"></select>
+      </div>
+      <div class="control-group">
+        <label for="conditionSelect">Physical condition</label>
+        <select id="conditionSelect"></select>
+      </div>
+    </section>
+    <div id="status" class="status">Loading data...</div>
+    <div id="map"></div>
+  </main>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script>
+    const CSV_FILES = [
+      "alberta.csv",
+      "britishColumbia.csv",
+      "manitoba.csv",
+      "newBrunswick.csv",
+      "newFoundLand.csv",
+      "northwestTerritories.csv",
+      "novaScotia.csv",
+      "nunavut.csv",
+      "ontario.csv",
+      "princeEdwardIsland.csv",
+      "quebec.csv",
+      "saskatchewan.csv",
+      "yukon.csv"
+    ];
+
+    const GEOJSON_URL =
+      "https://raw.githubusercontent.com/codeforgermany/click_that_hood/main/public/data/canada.geojson";
+
+    const PROVINCE_ALIASES = {
+      alberta: "Alberta",
+      "british columbia": "British Columbia",
+      manitoba: "Manitoba",
+      "new brunswick": "New Brunswick",
+      "newfoundland and labrador": "Newfoundland and Labrador",
+      newfoundland: "Newfoundland and Labrador",
+      "northwest territories": "Northwest Territories",
+      "nova scotia": "Nova Scotia",
+      nunavut: "Nunavut",
+      ontario: "Ontario",
+      "prince edward island": "Prince Edward Island",
+      quebec: "Quebec",
+      saskatchewan: "Saskatchewan",
+      yukon: "Yukon",
+      "yukon territory": "Yukon"
+    };
+
+    const COMBINED_CONDITION_VALUE = "__combined_known_conditions__";
+    const COMBINED_CONDITION_LABEL = "Weighted condition score (1-5)";
+    const CONDITION_WEIGHTS = {
+      "Very poor": 1,
+      Poor: 2,
+      Fair: 3,
+      Good: 4,
+      "Very good": 5
+    };
+    const ALL_FACILITIES_VALUE = "__all_facilities__";
+    const ALL_FACILITIES_LABEL = "All facility type";
+    const FACILITY_GROUPS = {
+      "__ice_facilities__": {
+        label: "Ice facilities",
+        members: [
+          "Indoor ice arenas, single pad",
+          "Indoor ice arenas: multiple pads (two or more)",
+          "Indoor ice arenas: Performance/spectator",
+          "Outdoor ice arenas",
+          "Curling rinks"
+        ]
+      },
+      "__water_facilities__": {
+        label: "Water facilities",
+        members: [
+          "Indoor pools, 25 metres",
+          "Indoor pools, 50 metres or longer",
+          "Indoor pools, leisure pools",
+          "Outdoor pools",
+          "Outdoor spray parks/splash pads/wading pools"
+        ]
+      },
+      "__culture_facilities__": {
+        label: "Culture facilities",
+        members: [
+          "Galleries",
+          "Libraries",
+          "Presentation and performance spaces",
+          "Indigenous culture facilities",
+          "Community centres (senior and youth centres)"
+        ]
+      },
+      "__physical_activity_facilities__": {
+        label: "Physical activity facilities",
+        members: [
+          "Indoor gymnasiums",
+          "Indoor racquet courts",
+          "Indoor walking/jogging tracks",
+          "Indoor fitness areas",
+          "Indoor fields",
+          "Outdoor speciality areas",
+          "Playgrounds",
+          "Outdoor tennis and/or pickleball courts",
+          "Ball diamonds",
+          "Rectangular sports fields (natural turf)",
+          "Artificial turf sports fields",
+          "Paved pathways (in kilometres)",
+          "Trails (non-paved) (in kilometres)"
+        ]
+      }
+    };
+
+    const map = L.map("map", {
+      center: [58.5, -96],
+      zoom: 3,
+      minZoom: 3,
+      maxZoom: 10
+    });
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "&copy; OpenStreetMap contributors"
+    }).addTo(map);
+
+    const statusEl = document.getElementById("status");
+    const facilitySelect = document.getElementById("facilitySelect");
+    const conditionSelect = document.getElementById("conditionSelect");
+
+    const dataStore = {
+      records: [],
+      byKey: new Map(),
+      facilities: [],
+      conditions: [],
+      geojson: null
+    };
+
+    let geoLayer = null;
+    let legendContainer = null;
+
+    function normalizeName(value) {
+      return value
+        .toLowerCase()
+        .replace(/&/g, "and")
+        .replace(/[^a-z\s]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    function canonicalProvince(value) {
+      const n = normalizeName(value);
+      return PROVINCE_ALIASES[n] || value;
+    }
+
+    function csvToRecords(parsedRows) {
+      return parsedRows
+        .map((row) => {
+          const province = canonicalProvince(row.GEO || "");
+          const facility = row["Culture, recreation and sports facilities"];
+          const condition = row["Overall physical condition of assets"];
+          const value = Number.parseFloat(row.VALUE);
+
+          if (!province || !facility || !condition || Number.isNaN(value)) {
+            return null;
+          }
+
+          return { province, facility, condition, value };
+        })
+        .filter(Boolean);
+    }
+
+    async function loadCsv(fileName) {
+      const response = await fetch(fileName);
+      if (!response.ok) {
+        throw new Error(`Failed to load ${fileName}: ${response.status}`);
+      }
+      const text = await response.text();
+      const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
+      if (parsed.errors && parsed.errors.length > 0) {
+        throw new Error(`${fileName} parsing error: ${parsed.errors[0].message}`);
+      }
+      return csvToRecords(parsed.data);
+    }
+
+    function isWeightedMode() {
+      return conditionSelect.value === COMBINED_CONDITION_VALUE;
+    }
+
+    function formatValue(value) {
+      if (value === undefined) return "No data";
+      return isWeightedMode() ? value.toFixed(2) : `${value.toFixed(1)}%`;
+    }
+
+    function colorScale(value) {
+      if (value === null || value === undefined) return "#d9d9d9";
+      if (isWeightedMode()) {
+        if (value > 4.2) return "#084081";
+        if (value > 3.6) return "#0868ac";
+        if (value > 3.0) return "#2b8cbe";
+        if (value > 2.4) return "#4eb3d3";
+        if (value > 1.8) return "#7bccc4";
+        if (value > 0) return "#a8ddb5";
+        return "#e0f3db";
+      }
+      if (value > 50) return "#084081";
+      if (value > 40) return "#0868ac";
+      if (value > 30) return "#2b8cbe";
+      if (value > 20) return "#4eb3d3";
+      if (value > 10) return "#7bccc4";
+      if (value > 0) return "#a8ddb5";
+      return "#e0f3db";
+    }
+
+    function keyOf(province, facility, condition) {
+      return `${province}||${facility}||${condition}`;
+    }
+
+    function getSelectedFacilities(facility) {
+      if (FACILITY_GROUPS[facility]) {
+        return FACILITY_GROUPS[facility].members.filter((name) =>
+          dataStore.facilities.includes(name)
+        );
+      }
+      return facility === ALL_FACILITIES_VALUE ? dataStore.facilities : [facility];
+    }
+
+    function getFacilityLabel() {
+      if (FACILITY_GROUPS[facilitySelect.value]) {
+        return FACILITY_GROUPS[facilitySelect.value].label;
+      }
+      return facilitySelect.value === ALL_FACILITIES_VALUE
+        ? ALL_FACILITIES_LABEL
+        : facilitySelect.value;
+    }
+
+    function getValue(province, facility, condition) {
+      const facilities = getSelectedFacilities(facility);
+
+      if (condition === COMBINED_CONDITION_VALUE) {
+        let scoreTotal = 0;
+        let scoreCount = 0;
+        facilities.forEach((facilityName) => {
+          let numerator = 0;
+          let hasAny = false;
+          Object.entries(CONDITION_WEIGHTS).forEach(([conditionName, weight]) => {
+            const v = dataStore.byKey.get(
+              keyOf(province, facilityName, conditionName)
+            );
+            if (typeof v === "number" && !Number.isNaN(v)) {
+              numerator += weight * v;
+              hasAny = true;
+            }
+          });
+          if (hasAny) {
+            scoreTotal += numerator / 100;
+            scoreCount += 1;
+          }
+        });
+
+        return scoreCount > 0 ? scoreTotal / scoreCount : undefined;
+      }
+
+      let total = 0;
+      let count = 0;
+      facilities.forEach((facilityName) => {
+        const v = dataStore.byKey.get(keyOf(province, facilityName, condition));
+        if (typeof v === "number" && !Number.isNaN(v)) {
+          total += v;
+          count += 1;
+        }
+      });
+      return count > 0 ? total / count : undefined;
+    }
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    function populateSelect(selectEl, values) {
+      selectEl.innerHTML = "";
+      values.forEach((value) => {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = value;
+        selectEl.appendChild(option);
+      });
+    }
+
+    function styleFeature(feature) {
+      const province = canonicalProvince(feature.properties.name || "");
+      const value = getValue(
+        province,
+        facilitySelect.value,
+        conditionSelect.value
+      );
+
+      return {
+        fillColor: colorScale(value),
+        weight: 1,
+        opacity: 1,
+        color: "#3f4d5a",
+        fillOpacity: 0.85
+      };
+    }
+
+    function bindTooltip(feature, layer) {
+      const province = canonicalProvince(feature.properties.name || "");
+      const facilityLabel = getFacilityLabel();
+      const conditionLabel =
+        conditionSelect.value === COMBINED_CONDITION_VALUE
+          ? COMBINED_CONDITION_LABEL
+          : conditionSelect.value;
+      const value = getValue(
+        province,
+        facilitySelect.value,
+        conditionSelect.value
+      );
+
+      const valueText = formatValue(value);
+      layer.bindTooltip(
+        `<strong>${province}</strong><br>${facilityLabel}<br>${conditionLabel}: ${valueText}`
+      );
+
+      layer.on({
+        mouseover: () => {
+          layer.setStyle({ weight: 2, color: "#111" });
+          layer.bringToFront();
+        },
+        mouseout: () => {
+          geoLayer.resetStyle(layer);
+        }
+      });
+    }
+
+    function refreshMap() {
+      if (!geoLayer) return;
+      const facilityLabel = getFacilityLabel();
+      const conditionLabel =
+        conditionSelect.value === COMBINED_CONDITION_VALUE
+          ? COMBINED_CONDITION_LABEL
+          : conditionSelect.value;
+
+      geoLayer.setStyle(styleFeature);
+      geoLayer.eachLayer((layer) => {
+        const feature = layer.feature;
+        const province = canonicalProvince(feature.properties.name || "");
+        const value = getValue(
+          province,
+          facilitySelect.value,
+          conditionSelect.value
+        );
+        const valueText = formatValue(value);
+        layer.setTooltipContent(
+          `<strong>${province}</strong><br>${facilityLabel}<br>${conditionLabel}: ${valueText}`
+        );
+      });
+
+      setStatus(
+        `Showing ${conditionLabel.toLowerCase()} values for ${facilityLabel.toLowerCase()}.`
+      );
+      renderLegend();
+    }
+
+    function renderLegend() {
+      if (!legendContainer) return;
+
+      if (isWeightedMode()) {
+        const bins = [0, 1.8, 2.4, 3.0, 3.6, 4.2];
+        let html = "<strong>Weighted score</strong><br>";
+        bins.forEach((from, idx) => {
+          const to = bins[idx + 1];
+          const color = colorScale(from + 0.01);
+          html += `<i style="background:${color}"></i> ${from.toFixed(1)}${to ? `&ndash;${to.toFixed(1)}` : "+"}<br>`;
+        });
+        html += `<i style="background:#d9d9d9"></i> No data`;
+        legendContainer.innerHTML = html;
+        return;
+      }
+
+      const bins = [0, 10, 20, 30, 40, 50];
+      let html = "<strong>Value (%)</strong><br>";
+      bins.forEach((from, idx) => {
+        const to = bins[idx + 1];
+        const color = colorScale(from + 0.1);
+        html += `<i style="background:${color}"></i> ${from}${to ? `&ndash;${to}` : "+"}<br>`;
+      });
+      html += `<i style="background:#d9d9d9"></i> No data`;
+      legendContainer.innerHTML = html;
+    }
+
+    function addLegend() {
+      const legend = L.control({ position: "bottomright" });
+      legend.onAdd = function () {
+        legendContainer = L.DomUtil.create("div", "legend");
+        renderLegend();
+        return legendContainer;
+      };
+      legend.addTo(map);
+    }
+
+    async function init() {
+      try {
+        const [geojson, ...csvData] = await Promise.all([
+          fetch(GEOJSON_URL).then((r) => {
+            if (!r.ok) throw new Error(`Failed to load map geometry: ${r.status}`);
+            return r.json();
+          }),
+          ...CSV_FILES.map(loadCsv)
+        ]);
+
+        dataStore.geojson = geojson;
+        dataStore.records = csvData.flat();
+
+        dataStore.records.forEach((r) => {
+          dataStore.byKey.set(keyOf(r.province, r.facility, r.condition), r.value);
+        });
+
+        dataStore.facilities = [...new Set(dataStore.records.map((r) => r.facility))].sort();
+        dataStore.conditions = [...new Set(dataStore.records.map((r) => r.condition))].sort();
+
+        populateSelect(facilitySelect, dataStore.facilities);
+        populateSelect(conditionSelect, dataStore.conditions);
+
+        const allFacilitiesOption = document.createElement("option");
+        allFacilitiesOption.value = ALL_FACILITIES_VALUE;
+        allFacilitiesOption.textContent = ALL_FACILITIES_LABEL;
+        facilitySelect.insertBefore(allFacilitiesOption, facilitySelect.firstChild);
+
+        Object.entries(FACILITY_GROUPS).forEach(([value, group]) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = group.label;
+          facilitySelect.appendChild(option);
+        });
+
+        const combinedOption = document.createElement("option");
+        combinedOption.value = COMBINED_CONDITION_VALUE;
+        combinedOption.textContent = COMBINED_CONDITION_LABEL;
+        conditionSelect.insertBefore(combinedOption, conditionSelect.firstChild);
+
+        facilitySelect.value = ALL_FACILITIES_VALUE;
+        conditionSelect.value = COMBINED_CONDITION_VALUE;
+
+        facilitySelect.addEventListener("change", refreshMap);
+        conditionSelect.addEventListener("change", refreshMap);
+
+        geoLayer = L.geoJSON(dataStore.geojson, {
+          style: styleFeature,
+          onEachFeature: bindTooltip
+        }).addTo(map);
+
+        map.fitBounds(geoLayer.getBounds(), { padding: [12, 12] });
+        addLegend();
+        refreshMap();
+      } catch (err) {
+        console.error(err);
+        setStatus(
+          `Error: ${err.message}. If you opened this file directly, run a local server first (for example: python -m http.server).`
+        );
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>
